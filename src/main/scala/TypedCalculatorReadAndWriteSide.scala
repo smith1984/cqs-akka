@@ -2,8 +2,7 @@ import akka.NotUsed
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.{ActorSystem, Props, _}
 import akka.persistence.typed.PersistenceId
-import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior}
-import akka_typed.TypedCalculatorWriteSide.{Add, Command, Divide, Multiply}
+import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior, RetentionCriteria}
 import akka.NotUsed
 import akka.actor.typed.scaladsl.{ActorContext, Behaviors}
 import akka.actor.typed.{ActorSystem, Props, _}
@@ -44,6 +43,7 @@ object akka_typed
     case class Added(id: Int, amount: Int)      extends Event
     case class Multiplied(id: Int, amount: Int) extends Event
     case class Divided(id: Int, amount: Int)    extends Event
+    case class CalculationCompleted(id: Int, amount: Int)    extends Event
 
     final case class State(value: Int) extends CborSerializable {
       def add(amount: Int): State      = copy(value = value + amount)
@@ -63,6 +63,11 @@ object akka_typed
           (state, command) => handleCommand("001", state, command, ctx),
           (state, event) => handleEvent(state, event, ctx)
         )
+          .snapshotWhen{
+          case (state, CalculationCompleted(_, _), seqNumber) if seqNumber % 10 == 0 => true
+          case (state, event, seqNumber) => true
+        }
+          .withRetention(RetentionCriteria.snapshotEvery(numberOfEvents = 100, keepNSnapshots = 2))
       }
 
     def handleCommand(
@@ -120,18 +125,6 @@ object akka_typed
 //    val readJournal: LeveldbReadJournal =
     val readJournal: CassandraReadJournal =
       PersistenceQuery(system).readJournalFor[CassandraReadJournal](CassandraReadJournal.Identifier)
-
-
-    /**
-     * В read side приложения с архитектурой CQRS (объект TypedCalculatorReadSide в TypedCalculatorReadAndWriteSide.scala) необходимо разделить бизнес логику и запись в целевой получатель, т.е.
-     * 1) Persistence Query должно находиться в Source
-     * 2) Обновление состояния необходимо переместить в отдельный от записи в БД флоу
-     * 3) ! Задание со звездочкой: вместо CalculatorRepository создать Sink c любой БД (например Postgres из docker-compose файла).
-     * Для последнего задания пригодится документация - https://doc.akka.io/docs/alpakka/current/slick.html#using-a-slick-flow-or-sink
-     * Результат выполненного д.з. необходимо оформить либо на github gist либо PR к текущему репозиторию.
-     *
-     * */
-
 
     val source: Source[EventEnvelope, NotUsed] = readJournal
       .eventsByPersistenceId("001", startOffset, Long.MaxValue)
@@ -196,9 +189,15 @@ object akka_typed
     Behaviors.setup { ctx =>
       val writeActorRef = ctx.spawn(TypedCalculatorWriteSide(), "Calculato", Props.empty)
 
-//      writeActorRef ! Add(10)
-//      writeActorRef ! Multiply(2)
-//      writeActorRef ! Divide(5)
+      writeActorRef ! Add(10)
+      writeActorRef ! Multiply(2)
+      writeActorRef ! Divide(5)
+//
+      (1 to 1000).foreach{ x =>
+        writeActorRef ! Add(10)
+      }
+//
+
 
       // 0 + 10 = 10
       // 10 * 2 = 20
@@ -207,20 +206,12 @@ object akka_typed
       Behaviors.same
     }
 
-  def execute(comm: Command): Behavior[NotUsed] =
-    Behaviors.setup { ctx =>
-      val writeActorRef = ctx.spawn(TypedCalculatorWriteSide(), "Calculato", Props.empty)
-
-      writeActorRef ! comm
-
-      Behaviors.same
-    }
 
   def main(args: Array[String]): Unit = {
     val value = akka_typed()
     implicit val system: ActorSystem[NotUsed] = ActorSystem(value, "akka_typed")
 
-    TypedCalculatorReadSide(system)
+//    TypedCalculatorReadSide(system)
 
     implicit val executionContext = system.executionContext
   }
